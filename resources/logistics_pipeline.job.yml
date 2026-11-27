@@ -1,0 +1,35 @@
+resources:
+  jobs:
+    logistics_delivery_pipeline:
+      name: "logistics_delivery_pipeline_${bundle.target}"
+      performance_target: STANDARD
+      tags:
+        aidevkit_project: ai-dev-kit
+        environment: ${bundle.target}
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+      tasks:
+        - task_key: prepare_shipments
+          environment_key: default
+          spark_python_task:
+            python_file: ../src/prepare_shipments.py
+            parameters:
+              - "--raw-path"
+              - "${var.raw_path}"
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema"
+              - "${var.schema}"
+
+        - task_key: build_kpi_views
+          depends_on:
+            - task_key: prepare_shipments
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../sql/logistics_kpis.sql
+            parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}

@@ -1,23 +1,25 @@
 # Project 2 — Logistics & Delivery Performance Analytics (Databricks)
 
 ## Business scenario
-A logistics company wants to understand why deliveries are late and where shipping costs are high. This pipeline ingests shipment, warehouse, and carrier data into Databricks Unity Catalog, enforces data quality checks, materializes Delta Lake tables, and exposes Databricks SQL KPI views for dashboards and operational recommendations.
+A logistics company wants to understand why deliveries are late and where shipping costs are high. This pipeline ingests shipment, warehouse, and carrier data into Databricks Unity Catalog, enforces data quality checks, materializes Delta Lake tables, and exposes Databricks SQL KPI views across isolated `dev` and `prod` environments using Databricks Asset Bundles (DABs).
 
-## Databricks Architecture
+## Databricks Architecture & Environments
 ```text
 CSV Files (warehouses.csv, shipments.csv, carriers.csv)
    │
    ▼
-Unity Catalog Volume: /Volumes/workspace/logistics/raw_data/
+Unity Catalog Volume:
+   ├── dev:  /Volumes/workspace/logistics_dev/raw_data/
+   └── prod: /Volumes/workspace/logistics/raw_data/
    │
-   ▼  Task 1: src/prepare_shipments.py (Python + PySpark Delta write)
-Unity Catalog Delta Tables (overwrite mode):
-   ├── workspace.logistics.shipments_clean
-   ├── workspace.logistics.warehouses
-   └── workspace.logistics.carriers
+   ▼  Task 1: src/prepare_shipments.py (Serverless Python + Delta overwrite)
+Unity Catalog Delta Tables:
+   ├── <catalog>.<schema>.shipments_clean   (Fact table)
+   ├── <catalog>.<schema>.warehouses        (Dimension table)
+   └── <catalog>.<schema>.carriers          (Dimension table)
    │
-   ▼  Task 2: sql/logistics_kpis.sql (Databricks SQL)
-Unity Catalog KPI Views (workspace.logistics.kpi_*):
+   ▼  Task 2: sql/logistics_kpis.sql (Databricks SQL Warehouse)
+Unity Catalog KPI Views (<catalog>.<schema>.kpi_*):
    ├── kpi_executive_summary
    ├── kpi_carrier_scorecard
    ├── kpi_warehouse_performance
@@ -27,27 +29,34 @@ Unity Catalog KPI Views (workspace.logistics.kpi_*):
    └── kpi_monthly_trend
 ```
 
+| Environment | Branch | Bundle Mode | Target Schema | Raw Volume Path |
+|---|---|---|---|---|
+| `dev` (default) | `develop` | `development` | `workspace.logistics_dev` | `/Volumes/workspace/logistics_dev/raw_data` |
+| `prod` | `main` | `production` | `workspace.logistics` | `/Volumes/workspace/logistics/raw_data` |
+
 ## Unity Catalog Setup
-Run the following once in a Databricks SQL Editor or notebook to provision the schema and managed Volume:
+Run once in a Databricks SQL Editor or notebook to provision both `dev` and `prod` schemas and managed Volumes:
 
 ```sql
 CREATE CATALOG IF NOT EXISTS workspace;
+
+-- Dev environment
+CREATE SCHEMA IF NOT EXISTS workspace.logistics_dev;
+CREATE VOLUME IF NOT EXISTS workspace.logistics_dev.raw_data;
+
+-- Prod environment
 CREATE SCHEMA IF NOT EXISTS workspace.logistics;
 CREATE VOLUME IF NOT EXISTS workspace.logistics.raw_data;
 ```
 
-Upload the source CSV files (`data/shipments.csv`, `data/warehouses.csv`, `data/carriers.csv`) into:
-
-```text
-/Volumes/workspace/logistics/raw_data/
-```
-
-You can also upload via the Databricks CLI:
+Upload `data/shipments.csv`, `data/warehouses.csv`, and `data/carriers.csv` into each Volume via the Databricks CLI:
 
 ```bash
-databricks fs cp data/shipments.csv dbfs:/Volumes/workspace/logistics/raw_data/shipments.csv --overwrite
-databricks fs cp data/warehouses.csv dbfs:/Volumes/workspace/logistics/raw_data/warehouses.csv --overwrite
-databricks fs cp data/carriers.csv dbfs:/Volumes/workspace/logistics/raw_data/carriers.csv --overwrite
+for vol in logistics_dev logistics; do
+  databricks fs cp data/shipments.csv  dbfs:/Volumes/workspace/$vol/raw_data/shipments.csv  --overwrite
+  databricks fs cp data/warehouses.csv dbfs:/Volumes/workspace/$vol/raw_data/warehouses.csv --overwrite
+  databricks fs cp data/carriers.csv   dbfs:/Volumes/workspace/$vol/raw_data/carriers.csv   --overwrite
+done
 ```
 
 ## Business & Data Quality Rules
@@ -61,28 +70,32 @@ databricks fs cp data/carriers.csv dbfs:/Volumes/workspace/logistics/raw_data/ca
   - `is_late = actual_days > promised_days`
   - `cost_per_km = shipping_cost / distance_km`
 
-## Databricks Workflow Job Tasks
-Create a multi-task Databricks Workflow (e.g., `logistics_delivery_pipeline`) backed by this Git repository:
+## Databricks Asset Bundle Deployment (DABs)
+Bundle configuration lives in [databricks.yml](databricks.yml) and [resources/logistics_pipeline.job.yml](resources/logistics_pipeline.job.yml).
 
-1. **Task 1 — `prepare_shipments` (Python script task)**
-   - **Source**: Git repository (`src/prepare_shipments.py`)
-   - **Parameters / Environment**: Optional `RAW_DATA_PATH` environment variable or `--raw-path /Volumes/workspace/logistics/raw_data` (default).
-   - **Output**: Overwrites Delta tables `workspace.logistics.shipments_clean`, `workspace.logistics.warehouses`, and `workspace.logistics.carriers`.
+Validate, deploy, and run `dev`:
+```bash
+databricks bundle validate --strict -t dev --profile capstone_logistic_delivery
+databricks bundle deploy -t dev --profile capstone_logistic_delivery
+databricks bundle run logistics_delivery_pipeline -t dev --profile capstone_logistic_delivery
+```
 
-2. **Task 2 — `build_kpi_views` (SQL file task, depends on `prepare_shipments`)**
-   - **Source**: Git repository (`sql/logistics_kpis.sql`)
-   - **Warehouse**: Databricks SQL Warehouse
-   - **Output**: Creates/updates all `workspace.logistics.kpi_*` views.
+Validate, deploy, and run `prod`:
+```bash
+databricks bundle validate --strict -t prod --profile capstone_logistic_delivery
+databricks bundle deploy -t prod --profile capstone_logistic_delivery
+databricks bundle run logistics_delivery_pipeline -t prod --profile capstone_logistic_delivery
+```
 
 ## GitHub Actions CI/CD & Required Secrets
-The workflow in `.github/workflows/ci.yml`:
+The workflow in [.github/workflows/ci.yml](.github/workflows/ci.yml):
 1. Runs `pytest` on every push and pull request to `main` and `develop`.
-2. On pushes to `main`, installs the Databricks CLI via `databricks/setup-cli@main` and triggers the Databricks Workflow using `databricks jobs run-now`.
+2. On pushes to `develop`, validates, deploys, and runs the **`dev`** DABs target (`workspace.logistics_dev`).
+3. On pushes to `main`, validates, deploys, and runs the **`prod`** DABs target (`workspace.logistics`).
 
 Configure these repository secrets in **GitHub Settings → Secrets and variables → Actions**:
-- `DATABRICKS_HOST`: Workspace URL (e.g. `https://adb-1234567890123456.7.azuredatabricks.net` or `https://dbc-xxxxxxxx-xxxx.cloud.databricks.com`)
-- `DATABRICKS_TOKEN`: Databricks Personal Access Token (PAT) or Service Principal OAuth token with permission to run the job
-- `DATABRICKS_JOB_ID`: Numeric ID of the Databricks Workflow job
+- `DATABRICKS_HOST`: Workspace URL (e.g. `https://dbc-e8436b8e-0330.cloud.databricks.com`)
+- `DATABRICKS_TOKEN`: Databricks Service Principal token (recommended for CI/CD) or workspace access token
 
 ## Local Development & Testing
 Install dependencies and run the local test suite without requiring a live Databricks cluster:
@@ -101,17 +114,20 @@ python src/prepare_shipments.py --raw-path data --dry-run
 ## Project Structure
 ```text
 capstone_2_logistics_delivery/
-├── .github/workflows/ci.yml   # CI tests + Databricks job trigger on main
-├── data/                      # Local sample/source CSVs (500+ rows each)
+├── .github/workflows/ci.yml               # CI tests + dev/prod DABs deployment
+├── databricks.yml                         # Databricks Asset Bundle targets (dev/prod)
+├── resources/
+│   └── logistics_pipeline.job.yml         # Parameterized serverless multi-task job
+├── data/                                  # Local sample/source CSVs (500+ rows each)
 │   ├── carriers.csv
 │   ├── shipments.csv
 │   └── warehouses.csv
 ├── sql/
-│   └── logistics_kpis.sql     # Databricks SQL KPI views in workspace.logistics
+│   └── logistics_kpis.sql                 # Parameterized Databricks SQL KPI views
 ├── src/
-│   └── prepare_shipments.py   # Validation, cleaning, and Delta table writer
+│   └── prepare_shipments.py               # Validation, cleaning, and Delta writer
 ├── tests/
-│   └── test_sources.py        # Unit & data-contract tests
+│   └── test_sources.py                    # Unit & data-contract tests
 ├── README.md
 └── requirements.txt
 ```

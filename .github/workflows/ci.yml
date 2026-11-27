@@ -30,7 +30,27 @@ jobs:
       - name: Run unit tests
         run: pytest -q
 
-  trigger-databricks-workflow:
+  deploy-dev:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Deploy & run dev bundle target
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          databricks bundle validate --strict -t dev
+          databricks bundle deploy -t dev --auto-approve
+          databricks bundle run logistics_delivery_pipeline -t dev
+
+  deploy-prod:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -41,8 +61,11 @@ jobs:
       - name: Set up Databricks CLI
         uses: databricks/setup-cli@main
 
-      - name: Run Databricks Workflow
+      - name: Deploy & run prod bundle target
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: databricks jobs run-now ${{ secrets.DATABRICKS_JOB_ID }}
+        run: |
+          databricks bundle validate --strict -t prod
+          databricks bundle deploy -t prod --auto-approve
+          databricks bundle run logistics_delivery_pipeline -t prod
